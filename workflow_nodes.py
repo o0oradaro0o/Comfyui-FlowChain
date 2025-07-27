@@ -19,7 +19,7 @@ BOOLEAN = ("BOOLEAN", {"default": True})
 STRING = ("STRING", {"default": ""})
 any_input = AnyType("*")
 node_type_list = ["none", "IMAGE", "MASK", "STRING", "INT", "FLOAT", "LATENT", "BOOLEAN", "CLIP", "CONDITIONING",
-                  "MODEL", "VAE", "DICT", "AUDIO", "AUDIO_PATH", "VIDEO_PATH", "AUDIO/VIDEO_PATH", "DOC_PATH", "IMAGE_PATH", "PROMPT"]
+                  "MODEL", "VAE", "DICT", "AUDIO", "AUDIO_PATH", "VIDEO_PATH", "AUDIO/VIDEO_PATH", "DOC_PATH", "IMAGE_PATH", "PROMPT", "WANVIDLORA"]
 
 
 class WorkflowContinue:

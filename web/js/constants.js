@@ -19,6 +19,7 @@ export const colors = [
   "#9f826b",
   "#499f49",
   "#392978",
+  "#8B4513",
 ];
 export const bg_colors = [
   "#000000",
@@ -41,6 +42,7 @@ export const bg_colors = [
   "#7f826b",
   "#199f49",
   "#092978",
+  "#5D2E0A",
 ];
 export const node_type_list = [
   "none",
@@ -64,6 +66,7 @@ export const node_type_list = [
   "AUDIO/VIDEO_PATH",
   "DOC_PATH",
   "PROMPT",
+  "WANVIDLORA",
 ];
 export const string_widget = [
   "STRING",
