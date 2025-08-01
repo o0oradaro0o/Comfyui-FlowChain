@@ -119,7 +119,7 @@ class Workflow(SaveImage):
 
         return m.digest().hex()
 
-    def generate(self, workflows, workflow, unique_id, **kwargs):
+    async def generate(self, workflows, workflow, unique_id, **kwargs):
 
         def populate_inputs(workflow, inputs, kwargs_values):
             workflow_inputs = {k: v for k, v in workflow.items() if  "class_type" in v and v["class_type"] == "WorkflowInput"}
@@ -384,9 +384,30 @@ class Workflow(SaveImage):
             try:
                 if workflows == "{}":
                     raise ValueError("Empty workflow.")
+                
+                # If workflows is empty or None, try to load from file
+                if not workflows or workflows.strip() == "":
+                    workflow_file_path = os.path.join(folder_paths.user_directory, "default", "workflows", workflow_name)
+                    if os.path.exists(workflow_file_path):
+                        with open(workflow_file_path, "r", encoding="utf-8") as f:
+                            workflows = f.read()
+                    else:
+                        raise FileNotFoundError(f"Workflow file not found: {workflow_file_path}")
+                
                 workflow = json.loads(workflows)
-            except:
-                raise RuntimeError(f"Error while loading workflow: {workflow_name}, See <a href='https://github.com/numz/Comfyui-FlowChain'> for more information.")
+                
+                # Validate that the parsed JSON is a dictionary (expected workflow structure)
+                if not isinstance(workflow, dict):
+                    raise ValueError(f"Invalid workflow structure: expected dictionary, got {type(workflow).__name__}")
+                    
+            except Exception as e:
+                print(f"JSON parsing error for workflow '{workflow_name}':")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print(f"Workflow content length: {len(workflows) if workflows else 0}")
+                print(f"First 200 chars: {workflows[:200] if workflows else 'None'}")
+                print(f"Last 200 chars: {workflows[-200:] if workflows and len(workflows) > 200 else 'N/A'}")
+                raise RuntimeError(f"Error while loading workflow: {workflow_name}. JSON parsing failed: {str(e)}. See <a href='https://github.com/numz/Comfyui-FlowChain'> for more information.")
 
             workflow, max_id = redefine_id(workflow, max_id)
             sub_workflows = {k: v for k, v in workflow.items() if "class_type" in v and v["class_type"] == "Workflow"}
@@ -454,6 +475,7 @@ class Workflow(SaveImage):
             original_inputs = {}
         
         workflow, _ = get_recursive_workflow(workflows, workflow, 5000)
+        print(f"DEBUG: Calling get_recursive_workflow with workflow_name='{workflows}', workflow_content_length={len(workflow) if workflow else 0}")
         workflow, workflow_outputs = clean_workflow(workflow, original_inputs, kwargs)
         
         # Accéder au fichier JSON original pour obtenir les positions correctes
@@ -512,7 +534,7 @@ class Workflow(SaveImage):
         simple_server = SimpleServer()
         executor = PromptExecutor(simple_server)
         
-        executor.execute(workflow, prompt_id, {"client_id": client_id}, workflow_outputs_id)
+        await executor.execute_async(workflow, prompt_id, {"client_id": client_id}, workflow_outputs_id)
 
         history_result = executor.history_result
         comfy.model_management.unload_all_models()
