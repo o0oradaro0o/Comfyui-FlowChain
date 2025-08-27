@@ -111,8 +111,10 @@ class WorkflowOutput:
         return {
             "required": {
                 "Name": STRING,
-                #"type": (node_type_list,)
                 "default": ("*",)
+            },
+            "optional": {
+                "type": (node_type_list,),
             },
             "hidden": {
                 "ui": BOOLEAN
@@ -126,40 +128,64 @@ class WorkflowOutput:
 
 
     @classmethod
-    def IS_CHANGED(s, Name, ui=True, **kwargs):
+    def IS_CHANGED(s, Name, ui=True, type=None, **kwargs):
         m = hashlib.sha256()
         m.update(Name.encode())
+        if type is not None:
+            m.update(type.encode())
         return m.digest().hex()
 
     @classmethod
     def VALIDATE_INPUTS(cls, input_types):
         return True
     
-    def execute(self, Name, ui=True, **kwargs):
+    def execute(self, Name, ui=True, type=None, **kwargs):
+        # If type is not specified, try to infer it from the data or default to IMAGE
+        if type is None:
+            if kwargs.get("default") is not None:
+                data = kwargs["default"]
+                if isinstance(data, torch.Tensor):
+                    if len(data.shape) == 4 and data.shape[-1] == 3:  # Likely an image tensor
+                        type = "IMAGE"
+                    elif len(data.shape) == 3:  # Could be a mask
+                        type = "MASK"
+                    else:
+                        type = "IMAGE"  # Default fallback
+                else:
+                    type = "IMAGE"  # Default fallback
+            else:
+                type = "IMAGE"  # Default fallback
+        
         if ui:
             if kwargs["default"] is None:
-                return (torch.tensor([]),)
-            return (kwargs["default"],)
-        else:
-            """
-            if type in ["IMAGE", "MASK"]:
-                if kwargs["default"] is None:
+                # Return appropriate default based on type
+                if type in ["IMAGE", "MASK"]:
                     black_image_np = np.zeros((255, 255, 3), dtype=np.uint8)
                     black_image_pil = Image.fromarray(black_image_np)
                     transform = transforms.ToTensor()
                     image_tensor = transform(black_image_pil)
                     image_tensor = image_tensor.permute(1, 2, 0)
                     image_tensor = image_tensor.unsqueeze(0)
-                    return {"ui": {"default": image_tensor}}
-                return {"ui": {"default": [kwargs["default"]]}}
-            elif type == "LATENT":
-                if kwargs["default"] is None:
-                    return {"ui": {"default": torch.tensor([])}}
-                return {"ui": {"default": [kwargs["default"]]}}
-            else:
-            """
+                    return (image_tensor,)
+                else:
+                    return (torch.tensor([]),)
+            return (kwargs["default"],)
+        else:
+            # Non-UI mode - return data for workflow execution
             ui = {"ui": {}}
-            ui["ui"]["default"] = [kwargs["default"]]
+            if kwargs["default"] is None:
+                if type in ["IMAGE", "MASK"]:
+                    black_image_np = np.zeros((255, 255, 3), dtype=np.uint8)
+                    black_image_pil = Image.fromarray(black_image_np)
+                    transform = transforms.ToTensor()
+                    image_tensor = transform(black_image_pil)
+                    image_tensor = image_tensor.permute(1, 2, 0)
+                    image_tensor = image_tensor.unsqueeze(0)
+                    ui["ui"]["default"] = [image_tensor]
+                else:
+                    ui["ui"]["default"] = [torch.tensor([])]
+            else:
+                ui["ui"]["default"] = [kwargs["default"]]
             return ui
 
 
