@@ -553,6 +553,56 @@ class Workflow(SaveImage):
             workflow = recursive_delete(workflow, switch_to_delete + continue_to_delete)
             return workflow, workflow_outputs
 
+        def enforce_expected_types(workflow):
+            # Ensure inputs adhere to the stored _expected_input_types
+            for node_id, node in workflow.items():
+                if not isinstance(node, dict):
+                    continue
+                expected = node.get("_expected_input_types")
+                inputs = node.get("inputs")
+                if not expected or not isinstance(inputs, dict):
+                    continue
+                to_remove = []
+                for k, v in inputs.items():
+                    if isinstance(v, list):
+                        # connection - skip
+                        continue
+                    exp = expected.get(k, "").upper()
+                    try:
+                        if exp == "INT":
+                            if isinstance(v, float) and v.is_integer():
+                                inputs[k] = int(v)
+                            elif not isinstance(v, int):
+                                to_remove.append(k)
+                        elif exp == "FLOAT":
+                            if isinstance(v, (int, float)):
+                                inputs[k] = float(v)
+                            else:
+                                to_remove.append(k)
+                        elif exp == "BOOLEAN":
+                            if not isinstance(v, bool):
+                                to_remove.append(k)
+                        elif exp == "STRING":
+                            if not isinstance(v, str):
+                                try:
+                                    inputs[k] = str(v)
+                                except Exception:
+                                    to_remove.append(k)
+                        elif exp == "COMBO":
+                            # combos should not be booleans
+                            if isinstance(v, bool):
+                                to_remove.append(k)
+                            elif not isinstance(v, (str, int)):
+                                to_remove.append(k)
+                    except Exception:
+                        # if coercion fails, remove and let defaults apply
+                        to_remove.append(k)
+                for k in to_remove:
+                    bad_val = inputs.pop(k, None)
+                    if bad_val is not None:
+                        node.setdefault("_invalid_coerced_inputs_final", {})[k] = bad_val
+            return workflow
+
         def convert_comfyui_workflow_to_internal_format(workflow_data):
             """Convert ComfyUI export format to internal workflow format"""
             if not isinstance(workflow_data, dict):
@@ -603,85 +653,134 @@ class Workflow(SaveImage):
                     
                 node_id = str(node["id"])
                 
+                # Prepare expected types map from schema
+                expected_type_map = {}
+                if isinstance(node.get("inputs"), list):
+                    for input_def in node["inputs"]:
+                        if isinstance(input_def, dict):
+                            name = input_def.get("name")
+                            t = (input_def.get("type") or "").upper()
+                            if name:
+                                expected_type_map[name] = t
+                
                 # Convert node structure to expected internal format
                 converted_node = {
-                    "class_type": node.get("type", ""),
-                    "inputs": {}
+                    "class_type": node_type,
+                    "inputs": {},
+                    "_expected_input_types": expected_type_map,
                 }
                 
                 # Copy over any properties from the node to inputs
                 if "properties" in node and isinstance(node["properties"], dict):
                     converted_node["inputs"].update(node["properties"])
                     
-                # Handle widgets_values (node parameters)
-                if "widgets_values" in node:
-                    if isinstance(node["widgets_values"], dict):
-                        # For dict format, preserve the structure
-                        converted_node["inputs"].update(node["widgets_values"])
-                    elif isinstance(node["widgets_values"], list):
-                        # For list format, map to parameter names using the inputs definition
-                        widgets = node["widgets_values"]
-                        
-                        # Handle specific FlowChain node types first
-                        if node_type == "WorkflowInput" and len(widgets) >= 1:
-                            converted_node["inputs"]["Name"] = widgets[0] if len(widgets) > 0 else ""
-                            if len(widgets) > 1:
-                                converted_node["inputs"]["default"] = widgets[1]
-                        elif node_type == "WorkflowOutput" and len(widgets) >= 1:
-                            converted_node["inputs"]["Name"] = widgets[0] if len(widgets) > 0 else ""
-                            if "outputs" in node and isinstance(node["outputs"], list):
-                                for output in node["outputs"]:
-                                    if isinstance(output, dict) and "type" in output:
-                                        converted_node["inputs"]["type"] = output["type"]
-                                        break
-                            else:
-                                converted_node["inputs"]["type"] = "IMAGE"
-                        elif node_type == "Workflow" and len(widgets) >= 2:
-                            converted_node["inputs"]["workflows"] = widgets[0] if len(widgets) > 0 else ""
-                            converted_node["inputs"]["workflow"] = widgets[1] if len(widgets) > 1 else ""
-                        elif node_type == "WanVideoSampler":
-                            # Special handling for WanVideoSampler due to widget mapping complexity
-                            # Based on analysis of vidFlow.json widgets_values: [4, 1.0, 8.0, 1057359483639419, 'increment', False, 'lcm', 0, 1, '', 'comfy', 0, -1, False]
-                            if len(widgets) >= 14:
-                                converted_node["inputs"]["steps"] = widgets[0]  # 4
-                                converted_node["inputs"]["cfg"] = widgets[1]    # 1.0
-                                converted_node["inputs"]["shift"] = widgets[2]  # 8.0
-                                converted_node["inputs"]["seed"] = widgets[3]   # 1057359483639419
-                                # Skip widgets[4] = 'increment' - this seems to be misplaced or extra
-                                converted_node["inputs"]["force_offload"] = widgets[5]  # False
-                                converted_node["inputs"]["scheduler"] = widgets[6]      # 'lcm' - this is the correct scheduler
-                                converted_node["inputs"]["riflex_freq_index"] = widgets[7]  # 0
-                                converted_node["inputs"]["denoise_strength"] = widgets[8]   # 1
-                                converted_node["inputs"]["batched_cfg"] = widgets[9]        # ''
-                                converted_node["inputs"]["rope_function"] = widgets[10]     # 'comfy'
-                                converted_node["inputs"]["start_step"] = widgets[11]        # 0
-                                converted_node["inputs"]["end_step"] = widgets[12]          # -1
-                                converted_node["inputs"]["add_noise_to_samples"] = widgets[13]  # False
-                            else:
-                                # Fallback to original mapping if widgets length is unexpected
-                                converted_node["widgets_values"] = widgets
+                # Special handling for FlowChain meta nodes
+                widgets = node.get("widgets_values")
+                if node_type == "WorkflowInput":
+                    if isinstance(widgets, dict):
+                        name_val = widgets.get("Name")
+                        if isinstance(name_val, dict):
+                            converted_node["inputs"]["Name"] = name_val.get("value", "")
                         else:
-                            # For all other nodes, map widgets to their corresponding widget-enabled inputs
-                            # This mimics ComfyUI's internal widget mapping behavior
-                            if "inputs" in node and isinstance(node["inputs"], list):
-                                # Find inputs that have widgets (these get values from widgets_values)
-                                widget_inputs = []
-                                for input_def in node["inputs"]:
-                                    if isinstance(input_def, dict) and "widget" in input_def:
-                                        # This input expects a widget value
-                                        widget_inputs.append(input_def["name"])
-                                
-                                # Map widgets_values to widget-enabled inputs in order
-                                for i, widget_value in enumerate(widgets):
-                                    if i < len(widget_inputs):
-                                        input_name = widget_inputs[i]
-                                        converted_node["inputs"][input_name] = widget_value
-                                    else:
-                                        # If we have more widgets than expected widget inputs, store with generic names
-                                        converted_node["inputs"][f"widget_{i}"] = widget_value
+                            converted_node["inputs"]["Name"] = name_val or ""
+                        if "default" in widgets:
+                            converted_node["inputs"]["default"] = widgets["default"]
+                    elif isinstance(widgets, list) and len(widgets) >= 1:
+                        converted_node["inputs"]["Name"] = widgets[0]
+                        if len(widgets) > 1:
+                            converted_node["inputs"]["default"] = widgets[1]
+                elif node_type == "WorkflowOutput":
+                    # Name from widgets_values and type from outputs
+                    if isinstance(widgets, dict):
+                        name_val = widgets.get("Name")
+                        if isinstance(name_val, dict):
+                            converted_node["inputs"]["Name"] = name_val.get("value", "")
+                        else:
+                            converted_node["inputs"]["Name"] = name_val or ""
+                    elif isinstance(widgets, list) and len(widgets) >= 1:
+                        converted_node["inputs"]["Name"] = widgets[0]
+                    # Determine output type
+                    out_type = None
+                    outs = node.get("outputs")
+                    if isinstance(outs, list):
+                        for out_def in outs:
+                            if isinstance(out_def, dict) and "type" in out_def:
+                                out_type = out_def["type"]
+                                break
+                    converted_node["inputs"]["type"] = out_type or "IMAGE"
+                elif node_type == "Workflow":
+                    # Internal sub-workflow reference node
+                    if isinstance(widgets, dict):
+                        if "workflows" in widgets:
+                            converted_node["inputs"]["workflows"] = widgets["workflows"]
+                        if "workflow" in widgets:
+                            converted_node["inputs"]["workflow"] = widgets["workflow"]
+                    elif isinstance(widgets, list):
+                        if len(widgets) > 0:
+                            converted_node["inputs"]["workflows"] = widgets[0]
+                        if len(widgets) > 1:
+                            converted_node["inputs"]["workflow"] = widgets[1]
+                
+                # Generic widgets mapping for the rest
+                if widgets is not None and node_type not in ("WorkflowInput", "WorkflowOutput", "Workflow"):
+                    if isinstance(widgets, dict):
+                        converted_node["inputs"].update(widgets)
+                    elif isinstance(widgets, list):
+                        # Build the ordered list of input names that accept widgets, with expected types
+                        widget_inputs = []
+                        expected_types = []
+                        if "inputs" in node and isinstance(node["inputs"], list):
+                            for input_def in node["inputs"]:
+                                if isinstance(input_def, dict) and "widget" in input_def:
+                                    input_name = input_def.get("name")
+                                    if not input_name and isinstance(input_def.get("widget"), dict):
+                                        input_name = input_def["widget"].get("name")
+                                    if input_name:
+                                        widget_inputs.append(input_name)
+                                        # Determine expected python type from Comfy type
+                                        t = (input_def.get("type") or "").upper()
+                                        if t == "INT":
+                                            expected_types.append((int,))
+                                        elif t == "FLOAT":
+                                            expected_types.append((int, float))  # accept ints for floats
+                                        elif t == "BOOLEAN":
+                                            expected_types.append((bool,))
+                                        elif t == "COMBO":
+                                            expected_types.append((str, int))   # combos are usually strings (sometimes enums as ints)
+                                        elif t == "STRING":
+                                            expected_types.append((str,))
+                                        else:
+                                            expected_types.append((object,))  # no strong expectation
+                        # Type-aware consume: scan ahead to find the first value matching expected type
+                        used = [False] * len(widgets)
+                        widx = 0
+                        for inp_idx, input_name in enumerate(widget_inputs):
+                            exp_types = expected_types[inp_idx] if inp_idx < len(expected_types) else (object,)
+                            # advance widx to next unused slot
+                            while widx < len(widgets) and used[widx]:
+                                widx += 1
+                            chosen_idx = None
+                            # First try current position
+                            if widx < len(widgets) and isinstance(widgets[widx], exp_types):
+                                chosen_idx = widx
                             else:
-                                # Fallback: preserve widgets_values if we can't determine the mapping
-                                converted_node["widgets_values"] = widgets
+                                # Look ahead small window to find a match
+                                for j in range(widx + 1, len(widgets)):
+                                    if not used[j] and isinstance(widgets[j], exp_types):
+                                        chosen_idx = j
+                                        break
+                            if chosen_idx is not None:
+                                converted_node["inputs"][input_name] = widgets[chosen_idx]
+                                used[chosen_idx] = True
+                                # keep widx progress minimal
+                                widx = min(chosen_idx + 1, len(widgets))
+                            else:
+                                # No suitable value; leave unset so node default applies
+                                pass
+                        # Preserve any leftover widgets that weren't consumed
+                        leftovers = [widgets[i] for i in range(len(widgets)) if not used[i]]
+                        if leftovers:
+                            converted_node.setdefault("_extra_widgets_values", []).extend(leftovers)
                 
                 # Handle input connections from other nodes using proper link resolution
                 if "inputs" in node and isinstance(node["inputs"], list):
@@ -689,76 +788,77 @@ class Workflow(SaveImage):
                         if isinstance(input_conn, dict):
                             input_name = input_conn.get("name", "")
                             link_id = input_conn.get("link", None)
-                            
                             if link_id is not None and link_id in link_mapping:
                                 source_node_id, source_slot = link_mapping[link_id]
-                                # Create proper connection reference [source_node_id, source_slot]
-                                # Only set this if we haven't already set this input from widgets
-                                if input_name not in converted_node["inputs"]:
-                                    # Special handling for problematic connections that cause tensor/boolean issues
-                                    if (node_type == "WanVideoImageToVideoEncode" and input_name == "end_image"):
-                                        # For end_image connections, add validation metadata
-                                        print(f"Warning: Setting up end_image connection from node {source_node_id} to {node_type}")
-                                        print(f"  This connection may cause tensor/boolean evaluation errors")
-                                        # Still create the connection but add a flag for special handling
-                                        converted_node["inputs"][input_name] = [source_node_id, source_slot]
-                                        # Add metadata to help with debugging
-                                        if "_connection_metadata" not in converted_node:
-                                            converted_node["_connection_metadata"] = {}
-                                        converted_node["_connection_metadata"][input_name] = {
-                                            "source_node": source_node_id,
-                                            "source_slot": source_slot,
-                                            "validation_needed": True,
-                                            "known_issue": "tensor_boolean_ambiguity"
-                                        }
-                                    else:
-                                        converted_node["inputs"][input_name] = [source_node_id, source_slot]
-                            elif input_name:
-                                # If there's no link and no widget value already set, 
-                                # this input should remain unconnected (None)
-                                if input_name not in converted_node["inputs"]:
-                                    pass  # Leave it as None/unset
+                                # Always let connections override default/widget values
+                                converted_node["inputs"][input_name] = [source_node_id, source_slot]
                 
                 internal_workflow[node_id] = converted_node
                 
-                # Validate that inputs don't contain unexpected tensor data
+                # Validation and special-case cleanup
                 if "inputs" in converted_node:
                     inputs_to_remove = []
                     for input_name, input_value in converted_node["inputs"].items():
-                        if hasattr(input_value, 'shape'):  # Check if it's a tensor
-                            print(f"Warning: Node {node_id} ({node_type}) input '{input_name}' contains tensor data, this may cause issues")
-                            print(f"  Tensor shape: {input_value.shape}, removing to prevent errors")
+                        if hasattr(input_value, 'shape'):
+                            print(f"Warning: Node {node_id} ({node_type}) input '{input_name}' contains tensor data, removing to prevent errors")
                             inputs_to_remove.append(input_name)
-                    
-                    # Remove tensor inputs to prevent runtime errors
                     for input_name in inputs_to_remove:
                         del converted_node["inputs"][input_name]
                     
-                    # Additional validation for known problematic combinations
+                    # Post-mapping type validation against node input schema
+                    expected_type_map = {}
+                    if isinstance(node.get("inputs"), list):
+                        for input_def in node["inputs"]:
+                            if isinstance(input_def, dict):
+                                name = input_def.get("name")
+                                t = (input_def.get("type") or "").upper()
+                                if name:
+                                    expected_type_map[name] = t
+                    sanitize_list = []
+                    for k, v in list(converted_node["inputs"].items()):
+                        if isinstance(v, list):
+                            # connection ref, skip
+                            continue
+                        exp = expected_type_map.get(k)
+                        if exp == "INT":
+                            if isinstance(v, float) and v.is_integer():
+                                converted_node["inputs"][k] = int(v)
+                            elif not isinstance(v, int):
+                                sanitize_list.append(k)
+                        elif exp == "FLOAT":
+                            if isinstance(v, (int, float)):
+                                converted_node["inputs"][k] = float(v)
+                            else:
+                                sanitize_list.append(k)
+                        elif exp == "BOOLEAN":
+                            if not isinstance(v, bool):
+                                sanitize_list.append(k)
+                        elif exp == "STRING":
+                            if not isinstance(v, str):
+                                # best-effort string cast
+                                try:
+                                    converted_node["inputs"][k] = str(v)
+                                except Exception:
+                                    sanitize_list.append(k)
+                        elif exp == "COMBO":
+                            # combos should be strings/ints; drop bools (prevents 'in' on bool)
+                            if isinstance(v, bool):
+                                sanitize_list.append(k)
+                            elif not isinstance(v, (str, int)):
+                                sanitize_list.append(k)
+                        # other types left as-is
+                    for k in sanitize_list:
+                        val = converted_node["inputs"].pop(k, None)
+                        if val is not None:
+                            converted_node.setdefault("_invalid_coerced_inputs", {})[k] = val
+                    
+                    # Known problematic connection
                     if node_type == "WanVideoImageToVideoEncode" and "end_image" in converted_node["inputs"]:
                         end_image_value = converted_node["inputs"]["end_image"]
                         if isinstance(end_image_value, list) and len(end_image_value) == 2:
-                            # This is a connection reference, check if the source is a WorkflowInput
-                            source_node_id = str(end_image_value[0])
-                            print(f"Warning: end_image connected from node {source_node_id}")
-                            print(f"  This may cause 'Boolean value of Tensor' errors in WanVideoWrapper")
-                            print(f"  Removing this connection to prevent runtime error")
-                            print(f"  Note: end_image will be None instead of connected image data")
-                            
-                            # Remove the problematic connection to prevent the runtime error
-                            # This means end_image will be None, which should work fine for optional parameters
+                            print("Info: Removing WanVideoImageToVideoEncode.end_image connection to avoid tensor->bool ambiguity")
                             del converted_node["inputs"]["end_image"]
-                            
-                            if "_validation_warnings" not in converted_node:
-                                converted_node["_validation_warnings"] = []
-                            converted_node["_validation_warnings"].append({
-                                "input": "end_image",
-                                "issue": "connection_removed_to_prevent_tensor_boolean_error",
-                                "source_node": source_node_id,
-                                "action": "removed_connection",
-                                "description": "Removed end_image connection to prevent 'Boolean value of Tensor' error in WanVideoWrapper"
-                            })
-                
+            
             print(f"Converted to internal format with {len(internal_workflow)} nodes")
             return internal_workflow
 
@@ -904,6 +1004,9 @@ class Workflow(SaveImage):
         
         workflow, workflow_outputs = clean_workflow(workflow, original_inputs, kwargs)
         
+        # Enforce expected types after all merges/cleaning to prevent booleans in COMBO fields
+        workflow = enforce_expected_types(workflow)
+        
         # Accéder au fichier JSON original pour obtenir les positions correctes
         workflow_file_path = os.path.join(folder_paths.user_directory, "default", "workflows", workflows)
         original_positions = {}
@@ -1014,7 +1117,8 @@ class Workflow(SaveImage):
                 output.append(result_value[0])
             else:
                 node = workflow_outputs[id_node]  # Récupérer le nœud correspondant à l'ID
-                if node["inputs"]["type"] == "IMAGE" or node["inputs"]["type"] == "MASK":
+                node_type_val = node.get("inputs", {}).get("type", "IMAGE")
+                if node_type_val == "IMAGE" or node_type_val == "MASK":
                     black_image_np = np.zeros((255, 255, 3), dtype=np.uint8)
                     black_image_pil = Image.fromarray(black_image_np)
                     transform = transforms.ToTensor()
