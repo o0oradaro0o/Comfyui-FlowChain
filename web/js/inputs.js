@@ -209,8 +209,10 @@ export function addInputs(node, inputs, widgets_values) {
         seen[input.name] = idx;
       }
     });
-    for (let i = indexesToRemove.length - 1; i >= 0; i--) {
-      node.removeInput(indexesToRemove[i]);
+    if (node.graph._nodes){
+      for (let i = indexesToRemove.length - 1; i >= 0; i--) {
+        node.removeInput(indexesToRemove[i]);
+      }
     }
     isinput = node.inputs.find((i) => i.name === name);
 
@@ -223,7 +225,7 @@ export function addInputs(node, inputs, widgets_values) {
         addWidgets(node, name, widget_param, app);
         isWidget = node.widgets.find((w) => w.name === name);
         if (isWidget) {
-          if (orderIndex !== undefined) isWidget.orderIndex = orderIndex; // Stocker l'index d'ordre// Stocker l'index d'ordre
+          if (orderIndex !== undefined) isWidget.orderIndex = orderIndex; // Stocker l'index d'ordre
         }
 
         if (isinput && !isinput.widget) {
@@ -549,7 +551,7 @@ export function removeInputs(node, inputs, widgets_values) {
   if (widgetsToRemove.length > 0)
     for (let i = node.widgets.length - 1; i >= 2; i--)
       if (widgetsToRemove.includes(node.widgets[i].name)) {
-        widgetName = node.widgets[i].name;
+        const widgetName = node.widgets[i].name;
         node.widgets.splice(i, 1);
         widgets_values.splice(i, 1);
         if (
